@@ -275,6 +275,44 @@ function handleOrientationSettings (platformConfig, infoPlist) {
     }
 }
 
+// Make sure we only update properties from our main app's target (and not the target a watch extension or a share extension)
+function updateBuildPropertyInMainTargetOnly(proj, targetName, prop, value) {
+    getMainTargetBuildConfigs(proj, targetName).forEach(config => config.buildSettings[prop] = value);
+}
+
+function getBuildPropertyFromMainTargetOnly(proj, targetName, prop) {
+  const configs = getMainTargetBuildConfigs(proj, targetName);
+  if (configs.length === 0) {
+    events.emit('warn', 'Cannot find buid property ' + prop + ' for target ' + targetName + ' (target not found or target doesn\'t have a build configurations list.');
+    return null;
+  } else {
+    return configs[0].buildSettings[prop];
+  }
+}
+
+function getMainTargetBuildConfigs(proj, targetName) {
+    // Check if we have a valid target - during prepare we do not have it
+    const target = proj.pbxTargetByName(targetName.normalize('NFD'));
+    const targetBuildConfigs = target && target.buildConfigurationList;
+
+    if (targetBuildConfigs) {
+      const mainTargetBuildConfigNames = [];
+      const xcConfigList = proj.pbxXCConfigurationList();
+
+      // Collect the UUID's from the configuration of our target
+      const buildVariants = xcConfigList[targetBuildConfigs].buildConfigurations;
+      for (const item of buildVariants) {
+          mainTargetBuildConfigNames.push(item.value);
+      }
+      const configs = proj.pbxXCBuildConfigurationSection();
+      return mainTargetBuildConfigNames.map(configName => configs[configName]);
+    } else {
+      events.emit('warn', 'The target ' + targetName + ' is not found or it doesn\'t have a build configurations list.');
+      return [];
+    }
+}
+
+
 function handleBuildSettings (platformConfig, locations, infoPlist) {
     var pkg = platformConfig.getAttribute('ios-CFBundleIdentifier') || platformConfig.packageName();
     var targetDevice = parseTargetDevicePreference(platformConfig.getPreference('target-device', 'ios'));
@@ -282,6 +320,7 @@ function handleBuildSettings (platformConfig, locations, infoPlist) {
     var needUpdatedBuildSettingsForLaunchStoryboard = checkIfBuildSettingsNeedUpdatedForLaunchStoryboard(platformConfig, infoPlist);
     var swiftVersion = platformConfig.getPreference('SwiftVersion', 'ios');
     var wkWebViewOnly = platformConfig.getPreference('WKWebViewOnly');
+    const targetName = platformConfig.name();
 
     var project;
 
@@ -291,17 +330,18 @@ function handleBuildSettings (platformConfig, locations, infoPlist) {
         return Q.reject(new CordovaError('Could not parse ' + locations.pbxproj + ': ' + err));
     }
 
-    var origPkg = project.xcode.getBuildProperty('PRODUCT_BUNDLE_IDENTIFIER');
-
+    var origPkg = getBuildPropertyFromMainTargetOnly(project.xcode, targetName, 'PRODUCT_BUNDLE_IDENTIFIER');
+    var isSamePkgName = (origPkg === pkg) || (origPkg === '"' + pkg + '"');
     // no build settings provided and we don't need to update build settings for launch storyboards,
     // then we don't need to parse and update .pbxproj file
-    if (origPkg === pkg && !targetDevice && !deploymentTarget && !needUpdatedBuildSettingsForLaunchStoryboard && !swiftVersion && !wkWebViewOnly) {
+    if (isSamePkgName && !targetDevice && !deploymentTarget && !needUpdatedBuildSettingsForLaunchStoryboard && !swiftVersion && !wkWebViewOnly) {
         return Q();
     }
 
-    if (origPkg !== pkg) {
-        events.emit('verbose', 'Set PRODUCT_BUNDLE_IDENTIFIER to ' + pkg + '.');
-        project.xcode.updateBuildProperty('PRODUCT_BUNDLE_IDENTIFIER', pkg);
+    if (!isSamePkgName) {
+        events.emit('info', 'Set PRODUCT_BUNDLE_IDENTIFIER to ' + pkg + '.');
+        // fix https://github.com/apache/cordova-ios/issues/538
+        updateBuildPropertyInMainTargetOnly(project.xcode, targetName, 'PRODUCT_BUNDLE_IDENTIFIER', pkg);
     }
 
     if (targetDevice) {
